@@ -811,48 +811,36 @@ static std::string convertFromBase64(const std::string &str)
 namespace
 {
    #ifdef _WIN32
-   std::wstring ToStdWString( std::string_view str )
-   {
-      std::wstring wstr;
-      int          nchars = ::MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.length(), 0, 0);
-      if ( nchars > 0 )
-      {
-        wstr.resize( nchars );
-        ::MultiByteToWideChar( CP_UTF8, 0, str.data(), (int)str.length(),
-                               const_cast<wchar_t *>( wstr.c_str() ),
-                                nchars );
-      }
 
-      return wstr;
-   }
+   static std::wstring Utf8ToWide(std::string_view s) {
+    if (s.empty()) return {};
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+    std::wstring w(len, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), len);
+    return w;
+  }
 
-   std::string ToStdString( std::wstring_view wstr )
-   {
-       std::string str;
-       int         nchars = ::WideCharToMultiByte( CP_UTF8, 0, wstr.data(), (int)wstr.length(), NULL, NULL, NULL, NULL );
-       if ( nchars > 0 )
-       {
-           str.resize(nchars);
-           ::WideCharToMultiByte( CP_UTF8, 0, wstr.data(), (int)wstr.length(),
-                                  const_cast<char *>(str.c_str()), nchars, NULL, NULL );
-       }
-
-       return str;
-   }
+  static std::string WideToUtf8(std::wstring_view w) {
+    if (w.empty()) return {};
+    int len = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    std::string s(len, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), s.data(), len, nullptr, nullptr);
+    return s;
+  }
    #endif
 
    bool Canonicalize(const char *path, char *resolved_path)
    {
 #ifdef _WIN32
-       std::wstring wpath = ToStdWString( path );
-       std::wstring wresolved_path;
-       wresolved_path.resize( PATH_MAX );
-       if ( PathCanonicalizeW( wresolved_path.data(), wpath.c_str() ) )
-       {
-           std::string path = ToStdString(wresolved_path);
-           strcpy_s( resolved_path, path.length() * sizeof( char ), path.c_str() );
+        std::string wstr = path;
+        std::wstring src = Utf8ToWide(wstr);
+        std::wstring dst(MAX_PATH, L'\0');            // writable buffer (LPWSTR)
+        if (PathCanonicalizeW(dst.data(), src.c_str())) {
+            dst.resize(wcslen(dst.c_str()));
+            std::string canon = WideToUtf8(dst);
+            strcpy_s( resolved_path, canon.length() * sizeof( char ), canon.c_str() );
 
-           return true;
+            return true;
        }
 
        return false;
