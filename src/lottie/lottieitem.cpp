@@ -106,7 +106,10 @@ static renderer::Layer *createLayerItem(model::Layer *layerData,
         return nullptr;
     }
     if (nodeBudget == 0) {
-        vWarning << "Max render node budget (" << kMaxLayerNodes << ") exceeded";
+        // Cast: VDebug has no size_t overload, and size_t is unsigned long long
+        // on Win64, which makes the call ambiguous under MSVC.
+        vWarning << "Max render node budget ("
+                 << static_cast<unsigned long>(kMaxLayerNodes) << ") exceeded";
         return nullptr;
     }
     --nodeBudget;
@@ -1074,7 +1077,8 @@ void renderer::Group::addChildren(model::Group *data, VArenaAlloc *allocator,
         size_t cost = contentItemCost(*it);
         if (cost > contentBudget) {
             vWarning << "Max shape content budget ("
-                     << kMaxShapeContentBudget << ") exceeded, dropping content item";
+                     << static_cast<unsigned long>(kMaxShapeContentBudget)
+                     << ") exceeded, dropping content item";
             continue;
         }
         contentBudget -= cost;
@@ -1604,7 +1608,8 @@ renderer::Repeater::Repeater(model::Repeater *data, VArenaAlloc *allocator,
 
     for (int i = 0; i < maxCopies; i++) {
         if (contentBudget == 0) {
-            vWarning << "Max shape content budget (" << kMaxShapeContentBudget
+            vWarning << "Max shape content budget ("
+                     << static_cast<unsigned long>(kMaxShapeContentBudget)
                      << ") exceeded, clamping repeater copies to " << i;
             break;
         }
