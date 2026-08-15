@@ -2037,6 +2037,19 @@ void LottieParserImpl::getValue(model::Color &color)
         }
     }
 
+    // Bodymovin exporters older than 4.1.9 emit colours in the 0-255 range
+    // instead of the normalized 0-1 range the schema mandates. Detect that
+    // legacy encoding and normalize it; otherwise Color::toColor() performs an
+    // out-of-range float->uint8_t conversion, which is undefined behaviour and
+    // renders differently depending on the compiler and target.
+    if (val[0] > 1.f || val[1] > 1.f || val[2] > 1.f) {
+        constexpr float inv255 = 1.f / 255.f;
+        val[0] *= inv255;
+        val[1] *= inv255;
+        val[2] *= inv255;
+        val[3] *= inv255;
+    }
+
     if (mColorFilter) mColorFilter(val[0], val[1], val[2]);
 
     color.r = val[0];
