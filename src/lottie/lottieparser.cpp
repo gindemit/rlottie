@@ -54,6 +54,8 @@
 // the parse.
 
 #include <array>
+#include <queue>
+#include <unordered_set>
 
 #include "lottiemodel.h"
 #include "rapidjson/document.h"
@@ -68,7 +70,6 @@ RAPIDJSON_DIAG_OFF(effc++)
 #include <windows.h>
 #include <shlwapi.h>
 
-#include <string_view>
 #endif
 
 #ifndef PATH_MAX
@@ -648,12 +649,48 @@ model::BlendMode LottieParserImpl::getBlendMode()
 
 void LottieParserImpl::resolveLayerRefs()
 {
+    // Build directed graph: assetId → direct precomp refIds.
+    // Then BFS from each asset to detect if it can reach itself (cycle).
+    std::unordered_set<std::string> cyclicAssets;
+    {
+        std::unordered_map<std::string, std::vector<std::string>> deps;
+        for (const auto &kv : compRef->mAssets) {
+            for (const auto &obj : kv.second->mLayers) {
+                if (obj->type() != model::Object::Type::Layer) continue;
+                auto layer = static_cast<model::Layer *>(obj);
+                if (layer->mLayerType == model::Layer::Type::Precomp &&
+                    layer->mExtra && !layer->mExtra->mPreCompRefId.empty()) {
+                    deps[kv.first].push_back(layer->mExtra->mPreCompRefId);
+                }
+            }
+        }
+        for (const auto &kv : deps) {
+            const std::string &           startId = kv.first;
+            std::unordered_set<std::string> visited;
+            std::queue<std::string>         q;
+            for (const auto &dep : kv.second) q.push(dep);
+            while (!q.empty()) {
+                std::string id = q.front(); q.pop();
+                if (id == startId) { cyclicAssets.insert(startId); break; }
+                if (!visited.insert(id).second) continue;
+                auto it = deps.find(id);
+                if (it != deps.end())
+                    for (const auto &dep : it->second) q.push(dep);
+            }
+        }
+    }
+
     for (const auto &layer : mLayersToUpdate) {
         auto search = compRef->mAssets.find(layer->extra()->mPreCompRefId);
         if (search != compRef->mAssets.end()) {
             if (layer->mLayerType == model::Layer::Type::Image) {
                 layer->extra()->mAsset = search->second;
             } else if (layer->mLayerType == model::Layer::Type::Precomp) {
+                if (cyclicAssets.count(search->first)) {
+                    vWarning << "Circular asset reference detected, ignoring: "
+                             << search->first;
+                    continue;
+                }
                 layer->mChildren = search->second->mLayers;
                 layer->setStatic(layer->isStatic() &&
                                  search->second->isStatic());
@@ -811,41 +848,51 @@ static std::string convertFromBase64(const std::string &str)
 namespace
 {
    #ifdef _WIN32
+   std::wstring ToStdWString( const std::string& str )
+   {
+      std::wstring wstr;
+      int          nchars = ::MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.length(), 0, 0);
+      if ( nchars > 0 )
+      {
+        wstr.resize( nchars );
+        ::MultiByteToWideChar( CP_UTF8, 0, str.data(), (int)str.length(),
+                               const_cast<wchar_t *>( wstr.c_str() ),
+                                nchars );
+      }
 
-   static std::wstring Utf8ToWide(std::string_view s) {
-    if (s.empty()) return {};
-    int len = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
-    std::wstring w(len, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), len);
-    return w;
-  }
+      return wstr;
+   }
 
-  static std::string WideToUtf8(std::wstring_view w) {
-    if (w.empty()) return {};
-    int len = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
-    std::string s(len, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), s.data(), len, nullptr, nullptr);
-    return s;
-  }
+   std::string ToStdString( const std::wstring& wstr )
+   {
+       std::string str;
+       int         nchars = ::WideCharToMultiByte( CP_UTF8, 0, wstr.data(), (int)wstr.length(), NULL, NULL, NULL, NULL );
+       if ( nchars > 0 )
+       {
+           str.resize(nchars);
+           ::WideCharToMultiByte( CP_UTF8, 0, wstr.data(), (int)wstr.length(),
+                                  const_cast<char *>(str.c_str()), nchars, NULL, NULL );
+       }
+
+       return str;
+   }
    #endif
 
    bool Canonicalize(const char *path, char *resolved_path)
    {
 #ifdef _WIN32
-        std::string wstr = path;
-        std::wstring src = Utf8ToWide(wstr);
-        std::wstring dst(MAX_PATH, L'\0');            // writable buffer (LPWSTR)
-        if (PathCanonicalizeW(dst.data(), src.c_str())) {
-            dst.resize(wcslen(dst.c_str()));
-            std::string canon = WideToUtf8(dst);
-            strcpy_s( resolved_path, canon.length() * sizeof( char ), canon.c_str() );
+       std::wstring wpath = ToStdWString(path);
+       std::replace(wpath.begin(), wpath.end(), L'/', L'\\');
+       if (wpath.empty() || wpath.size() >= MAX_PATH) return false;
 
-            return true;
-       }
+       wchar_t wresolved_path[MAX_PATH] = {};
+       if (!PathCanonicalizeW(wresolved_path, wpath.c_str())) return false;
 
-       return false;
+       std::string out = ToStdString(wresolved_path);
+       if (out.size() >= PATH_MAX) return false;
+       return strcpy_s(resolved_path, PATH_MAX, out.c_str()) == 0;
 #else
-       return realpath(path, resolved_path);
+       return realpath(path, resolved_path) != nullptr;
 #endif
    }
 }
@@ -867,7 +914,11 @@ static bool isResourcePathSafe(const std::string& baseDir, const std::string& us
 
     // Resolve target path
     std::string fullPath = baseDir;
-    if (!baseDir.empty() && baseDir.back() != '/') fullPath += "/";
+    #ifdef _WIN32
+    if (!fullPath.empty() && fullPath.back() != '/' && fullPath.back() != '\\') fullPath += '\\';
+    #else
+    if (!fullPath.empty() && fullPath.back() != '/') fullPath += '/';
+    #endif
     fullPath += userPath;
 
     if (!Canonicalize(fullPath.c_str(), resolvedTarget)) {
@@ -881,8 +932,13 @@ static bool isResourcePathSafe(const std::string& baseDir, const std::string& us
     std::string target(resolvedTarget);
 
     // Ensure target starts with base
+    #ifdef _WIN32
+        const char sep = '\\';
+    #else
+        const char sep = '/';
+    #endif
     bool result = target.compare(0, base.length(), base) == 0 &&
-         (target.length() == base.length() || target[base.length()] == '/');
+         (target.length() == base.length() || target[base.length()] == sep);
 
     if (!result) {
 #ifdef DEBUG_PARSER
