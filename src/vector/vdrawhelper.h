@@ -33,6 +33,16 @@
 
 V_USE_NAMESPACE
 
+#if defined(__SSE2__) || defined(_M_X64) || \
+    (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+#define V_SIMD_SSE2 1
+#endif
+
+#if defined(__ARM_NEON) || defined(__ARM_NEON__) || defined(__aarch64__) || \
+    defined(_M_ARM64)
+#define V_SIMD_NEON 1
+#endif
+
 struct VSpanData;
 struct Operator;
 
