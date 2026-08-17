@@ -275,6 +275,56 @@ static uint32_t gradientPixelFixed(const VGradientData *grad, int fixed_pos)
     return grad->mColorTable[gradientClamp(grad, ipos)];
 }
 
+template <VGradient::Spread spread>
+static inline uint32_t gradientPixelFixedSpread(const uint32_t *colorTable,
+                                                int fixed_pos)
+{
+    int ipos = (fixed_pos + (FIXPT_SIZE / 2)) >> FIXPT_BITS;
+
+    // The spread is selected once per span. Since it is a template constant,
+    // the compiler removes the other two modes from the per-pixel loop.
+    if (spread == VGradient::Spread::Repeat) {
+        ipos %= VGradient::colorTableSize;
+        if (ipos < 0) ipos += VGradient::colorTableSize;
+    } else if (spread == VGradient::Spread::Reflect) {
+        constexpr int limit = VGradient::colorTableSize * 2;
+        ipos %= limit;
+        if (ipos < 0) ipos += limit;
+        if (ipos >= VGradient::colorTableSize) ipos = limit - 1 - ipos;
+    } else {
+        ipos = vMax(0, vMin(ipos, VGradient::colorTableSize - 1));
+    }
+
+    return colorTable[ipos];
+}
+
+template <VGradient::Spread spread>
+static inline void fetchLinearGradientFixed(uint32_t *buffer,
+                                            const uint32_t *end,
+                                            const uint32_t *colorTable,
+                                            int t_fixed, int inc_fixed)
+{
+    // Four independent stores give MSVC enough work to overlap the fixed-point
+    // position updates with color-table loads. Update the accumulator in the
+    // original order so lookup rounding and overflow behavior remain unchanged.
+    while (end - buffer >= 4) {
+        buffer[0] = gradientPixelFixedSpread<spread>(colorTable, t_fixed);
+        t_fixed += inc_fixed;
+        buffer[1] = gradientPixelFixedSpread<spread>(colorTable, t_fixed);
+        t_fixed += inc_fixed;
+        buffer[2] = gradientPixelFixedSpread<spread>(colorTable, t_fixed);
+        t_fixed += inc_fixed;
+        buffer[3] = gradientPixelFixedSpread<spread>(colorTable, t_fixed);
+        t_fixed += inc_fixed;
+        buffer += 4;
+    }
+
+    while (buffer < end) {
+        *buffer++ = gradientPixelFixedSpread<spread>(colorTable, t_fixed);
+        t_fixed += inc_fixed;
+    }
+}
+
 static inline uint32_t gradientPixel(const VGradientData *grad, float pos)
 {
     int ipos = (int)(pos * (VGradient::colorTableSize - 1) + (float)(0.5));
@@ -313,15 +363,36 @@ void fetch_linear_gradient(uint32_t *buffer, const Operator *op,
             memfill32(buffer, gradientPixelFixed(gradient, int(t * FIXPT_SIZE)),
                       length);
         } else {
-            if (t + inc * length < float(INT_MAX >> (FIXPT_BITS + 1)) &&
-                t + inc * length > float(INT_MIN >> (FIXPT_BITS + 1))) {
+            const double tScaled = double(t) * FIXPT_SIZE;
+            const double incScaled = double(inc) * FIXPT_SIZE;
+            const float legacyEnd = t + inc * length;
+            const bool legacyFixedRange =
+                legacyEnd < float(INT_MAX >> (FIXPT_BITS + 1)) &&
+                legacyEnd > float(INT_MIN >> (FIXPT_BITS + 1));
+            const bool fixedInputsFit =
+                tScaled >= INT_MIN && tScaled <= INT_MAX &&
+                incScaled >= INT_MIN && incScaled <= INT_MAX;
+            int t_fixed = fixedInputsFit ? int(tScaled) : 0;
+            int inc_fixed = fixedInputsFit ? int(incScaled) : 0;
+            const int64_t lastFixed = int64_t(t_fixed) +
+                int64_t(inc_fixed) * (length > 0 ? length - 1 : 0);
+            if (legacyFixedRange && fixedInputsFit && lastFixed >= INT_MIN &&
+                lastFixed <= INT_MAX) {
                 // we can use fixed point math
-                int t_fixed = int(t * FIXPT_SIZE);
-                int inc_fixed = int(inc * FIXPT_SIZE);
-                while (buffer < end) {
-                    *buffer = gradientPixelFixed(gradient, t_fixed);
-                    t_fixed += inc_fixed;
-                    ++buffer;
+                switch (gradient->mSpread) {
+                case VGradient::Spread::Repeat:
+                    fetchLinearGradientFixed<VGradient::Spread::Repeat>(
+                        buffer, end, gradient->mColorTable, t_fixed, inc_fixed);
+                    break;
+                case VGradient::Spread::Reflect:
+                    fetchLinearGradientFixed<VGradient::Spread::Reflect>(
+                        buffer, end, gradient->mColorTable, t_fixed, inc_fixed);
+                    break;
+                case VGradient::Spread::Pad:
+                default:
+                    fetchLinearGradientFixed<VGradient::Spread::Pad>(
+                        buffer, end, gradient->mColorTable, t_fixed, inc_fixed);
+                    break;
                 }
             } else {
                 // we have to fall back to float math

@@ -119,57 +119,113 @@ static void src_Source(uint32_t *dest, int length, const uint32_t *src,
     }
 }
 
-static void src_SourceOver(uint32_t *dest, int length, const uint32_t *src,
-                           uint32_t constAlpha)
+static inline uint32x4_t source_over_full_neon(uint32x4_t source,
+                                               uint32x4_t dest)
 {
+    const uint8x16_t inverseAlpha =
+        vmvnq_u8(alpha_bytes_neon(source));
+    uint32x4_t result = vaddq_u32(
+        source,
+        vreinterpretq_u32_u8(byte_mul_neon(
+            vreinterpretq_u8_u32(dest), inverseAlpha)));
+
+    // The scalar full-opacity path deliberately leaves a destination pixel
+    // untouched for a completely transparent source pixel. An alpha-zero
+    // source with nonzero RGB is not equivalent and must still be blended.
+    const uint32x4_t transparent = vceqq_u32(source, vdupq_n_u32(0));
+    return vbslq_u32(transparent, dest, result);
+}
+
+static inline uint32x4_t source_over_partial_neon(uint32x4_t source,
+                                                  uint32x4_t dest,
+                                                  uint8_t constAlpha)
+{
+    const uint8x16_t scaledBytes =
+        byte_mul_neon(vreinterpretq_u8_u32(source), constAlpha);
+    const uint32x4_t scaledSource = vreinterpretq_u32_u8(scaledBytes);
+    const uint8x16_t inverseAlpha =
+        vmvnq_u8(alpha_bytes_neon(scaledSource));
+    return vaddq_u32(
+        scaledSource,
+        vreinterpretq_u32_u8(byte_mul_neon(
+            vreinterpretq_u8_u32(dest), inverseAlpha)));
+}
+
+static void src_SourceOverFull(uint32_t *dest, int length,
+                               const uint32_t *src)
+{
+    // Two independent vectors give out-of-order AArch64 cores enough work to
+    // overlap the multiply/shift chains without increasing the tail cost.
+    while (length >= 8) {
+        const uint32x4_t source0 = vld1q_u32(src);
+        const uint32x4_t source1 = vld1q_u32(src + 4);
+        const uint32x4_t dest0 = vld1q_u32(dest);
+        const uint32x4_t dest1 = vld1q_u32(dest + 4);
+        vst1q_u32(dest, source_over_full_neon(source0, dest0));
+        vst1q_u32(dest + 4, source_over_full_neon(source1, dest1));
+        src += 8;
+        dest += 8;
+        length -= 8;
+    }
     while (length >= 4) {
-        const uint32x4_t srcPixels = vld1q_u32(src);
+        const uint32x4_t source = vld1q_u32(src);
         const uint32x4_t destPixels = vld1q_u32(dest);
-        uint8x16_t blendedSource = vreinterpretq_u8_u32(srcPixels);
-
-        if (constAlpha != 255) {
-            blendedSource = byte_mul_neon(blendedSource, uint8_t(constAlpha));
-        }
-
-        const uint32x4_t scaledSource =
-            vreinterpretq_u32_u8(blendedSource);
-        const uint8x16_t inverseAlpha =
-            vmvnq_u8(alpha_bytes_neon(scaledSource));
-        uint32x4_t result = vaddq_u32(
-            scaledSource,
-            vreinterpretq_u32_u8(byte_mul_neon(
-                vreinterpretq_u8_u32(destPixels), inverseAlpha)));
-
-        // The scalar full-opacity path deliberately leaves a destination pixel
-        // untouched for a completely transparent source pixel.
-        if (constAlpha == 255) {
-            const uint32x4_t transparent = vceqq_u32(srcPixels, vdupq_n_u32(0));
-            result = vbslq_u32(transparent, destPixels, result);
-        }
-
-        vst1q_u32(dest, result);
+        vst1q_u32(dest, source_over_full_neon(source, destPixels));
         src += 4;
         dest += 4;
         length -= 4;
     }
-
-    if (constAlpha == 255) {
-        while (length-- > 0) {
-            const uint32_t source = *src++;
-            if (source >= 0xff000000u) {
-                *dest = source;
-            } else if (source != 0) {
-                *dest = source + BYTE_MUL(*dest, vAlpha(~source));
-            }
-            ++dest;
-        }
-    } else {
-        while (length-- > 0) {
-            const uint32_t source = BYTE_MUL(*src, constAlpha);
-            ++src;
+    while (length-- > 0) {
+        const uint32_t source = *src++;
+        if (source >= 0xff000000u) {
+            *dest = source;
+        } else if (source != 0) {
             *dest = source + BYTE_MUL(*dest, vAlpha(~source));
-            ++dest;
         }
+        ++dest;
+    }
+}
+
+static void src_SourceOverPartial(uint32_t *dest, int length,
+                                  const uint32_t *src, uint8_t constAlpha)
+{
+    while (length >= 8) {
+        const uint32x4_t source0 = vld1q_u32(src);
+        const uint32x4_t source1 = vld1q_u32(src + 4);
+        const uint32x4_t dest0 = vld1q_u32(dest);
+        const uint32x4_t dest1 = vld1q_u32(dest + 4);
+        vst1q_u32(dest,
+                  source_over_partial_neon(source0, dest0, constAlpha));
+        vst1q_u32(dest + 4,
+                  source_over_partial_neon(source1, dest1, constAlpha));
+        src += 8;
+        dest += 8;
+        length -= 8;
+    }
+    while (length >= 4) {
+        const uint32x4_t source = vld1q_u32(src);
+        const uint32x4_t destPixels = vld1q_u32(dest);
+        vst1q_u32(dest,
+                  source_over_partial_neon(source, destPixels, constAlpha));
+        src += 4;
+        dest += 4;
+        length -= 4;
+    }
+    while (length-- > 0) {
+        const uint32_t source = BYTE_MUL(*src, constAlpha);
+        ++src;
+        *dest = source + BYTE_MUL(*dest, vAlpha(~source));
+        ++dest;
+    }
+}
+
+static void src_SourceOver(uint32_t *dest, int length, const uint32_t *src,
+                           uint32_t constAlpha)
+{
+    if (constAlpha == 255) {
+        src_SourceOverFull(dest, length, src);
+    } else {
+        src_SourceOverPartial(dest, length, src, uint8_t(constAlpha));
     }
 }
 
