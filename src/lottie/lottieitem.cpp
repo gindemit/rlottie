@@ -157,6 +157,9 @@ void renderer::Composition::setValue(const std::string &keypath,
     mHasDynamicValue = true;
     LOTKeyPath key(keypath);
     mRootLayer->resolveKeyPath(key, 0, value);
+    // A static layer can otherwise return before updating its newly attached
+    // dynamic property when setValue is called after the first render.
+    mRootLayer->invalidate();
 }
 
 bool renderer::Composition::update(int frameNo, const VSize &size,
@@ -720,6 +723,14 @@ void renderer::CompLayer::updateContent()
     if (complexContent()) alpha = 1;
     for (const auto &layer : mLayers) {
         layer->update(mappedFrame, combinedMatrix(), alpha);
+    }
+}
+
+void renderer::CompLayer::invalidate()
+{
+    renderer::Layer::invalidate();
+    for (const auto &layer : mLayers) {
+        layer->invalidate();
     }
 }
 

@@ -243,6 +243,7 @@ public:
     std::vector<LOTMask> &       cmasks() { return mCApiData->mMasks; }
     std::vector<LOTNode *> &     cnodes() { return mCApiData->mCNodeList; }
     const char *                 name() const { return mLayerData->name(); }
+    virtual void                 invalidate() { mDirtyFlag = DirtyFlagBit::All; }
     virtual bool resolveKeyPath(LOTKeyPath &keyPath, uint32_t depth,
                                 LOTVariant &value);
 
@@ -280,6 +281,7 @@ public:
     void render(VPainter *painter, const VRle &mask, const VRle &matteRle,
                 SurfaceCache &cache) final;
     void buildLayerNode() final;
+    void invalidate() final;
     bool resolveKeyPath(LOTKeyPath &keyPath, uint32_t depth,
                         LOTVariant &value) override;
 
