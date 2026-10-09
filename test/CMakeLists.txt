@@ -5,7 +5,7 @@ add_definitions(-DDEMO_DIR="${CMAKE_SOURCE_DIR}/example/resource/")
 link_libraries(GTest::GTest GTest::Main)
 
 add_executable(vectorTestSuite testsuite.cpp test_vrect.cpp test_vpath.cpp
-    test_vdrawhelper.cpp
+    test_vdrawhelper.cpp test_vbitmap.cpp
     ${CMAKE_SOURCE_DIR}/src/vector/vbezier.cpp
     ${CMAKE_SOURCE_DIR}/src/vector/vbitmap.cpp
     ${CMAKE_SOURCE_DIR}/src/vector/vdebug.cpp
